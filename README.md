@@ -51,22 +51,25 @@ const char* WLED_DEFAULT_IP = "192.168.1.100";   // fallback if mDNS finds nothi
 | Short press | Toggle WLED power on/off |
 | Long press (600ms) | Cycle encoder mode |
 
-### Encoder modes
+### Control menus
 
 | Mode | Range | WLED API field |
 |---|---|---|
-| BRIGHTNESS | 0–255 | `bri` |
-| COLOR TEMP | 1900–6500 K | `cct` (mapped 0–255) |
-| HUE | 0–360° | `seg[0].col` (RGB) |
-| FX SPEED | 0–255 | `seg[0].sx` |
-| FX SELECT | 0–N | `seg[0].fx` |
+| BRIGHTNESS | 0-255 | `bri` |
+| PALETTE | 0-N | `seg[0].pal` |
+| PRESET | 1-250 | `ps` |
+| FX PATTERN | 0-N | `seg[0].fx` |
+| FX SPEED | 0-255 | `seg[0].sx` |
+| FX INTENSITY | 0-255 | `seg[0].ix` |
 
 ### WLED JSON API endpoints used
 
 ```
-GET  http://<WLED_IP>/json/eff     — fetch effect list on boot
-GET  http://<WLED_IP>/json/state   — background poll every 5s
-POST http://<WLED_IP>/json/state   — queued control updates
+GET  http://<WLED_IP>/json/eff     - fetch effect list on boot/controller refresh
+GET  http://<WLED_IP>/json/pal     - fetch palette list on boot/controller refresh
+GET  http://<WLED_IP>/presets.json - fetch preset list on boot/controller refresh
+GET  http://<WLED_IP>/json/state   - background poll every 5s
+POST http://<WLED_IP>/json/state   - queued control and preset updates
 ```
 
 ---
@@ -80,7 +83,7 @@ POST http://<WLED_IP>/json/state   — queued control updates
 5. Close any Serial Monitor using the board's COM port before uploading
 6. Flash and open Serial Monitor at 115200 baud
 
-### Exporting a fresh firmware `.bin`
+### Exporting fresh firmware images
 
 Run:
 
@@ -92,5 +95,10 @@ This compiles the sketch with `esp32:esp32:m5stack_dial:PartitionScheme=min_spif
 puts the build artifacts in `.arduino-build\`, and refreshes:
 
 ```text
-firmware\M5Dial_WLED_Remote.bin
+firmware\M5Dial_WLED_Remote.bin         app image, flash at 0x10000
+firmware\M5Dial_WLED_Remote.merged.bin  full flash image, flash at 0x0
 ```
+
+Use the merged image for recovery or first-time full-device flashing. Flashing
+the app image at `0x0` will boot with an invalid-header error because the
+bootloader belongs there.

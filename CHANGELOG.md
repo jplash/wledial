@@ -6,13 +6,15 @@ This changelog was started after the first round of development work, so the
 initial entry captures the codebase changes made so far rather than a single
 atomic release.
 
-## [Unreleased] - 2026-04-16 (session 5)
+## [0.5.0] - 2026-04-22
 
 ### Added
 
+- Added a `PRE` preset selection menu, populated from WLED's `/presets.json`
+  file, that applies presets with queued `{"ps": <id>}` state updates.
 - Added `build-firmware.ps1` to compile the sketch with
   `esp32:esp32:m5stack_dial:PartitionScheme=min_spiffs`, copy artifacts into
-  `.arduino-build`, and refresh `firmware/M5Dial_WLED_Remote.bin`.
+  `.arduino-build`, and refresh the app and merged images in `firmware/`.
 - Added `recover-flash.ps1` to erase and fully reflash the M5Dial from the
   repo's merged firmware image using `esptool`.
 - Added controller-state caching in `Preferences` so the UI can immediately

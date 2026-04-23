@@ -8,6 +8,7 @@ $buildPath = Join-Path $sketchDir 'build\esp32.esp32.m5stack_dial'
 $outputDir = Join-Path $projectRoot '.arduino-build'
 $firmwareDir = Join-Path $projectRoot 'firmware'
 $firmwareBin = Join-Path $firmwareDir 'M5Dial_WLED_Remote.bin'
+$firmwareMergedBin = Join-Path $firmwareDir 'M5Dial_WLED_Remote.merged.bin'
 $arduinoCli = 'C:\Program Files\Arduino CLI\arduino-cli.exe'
 $fqbn = 'esp32:esp32:m5stack_dial:PartitionScheme=min_spiffs'
 
@@ -46,5 +47,7 @@ foreach ($artifact in $artifacts) {
 }
 
 Copy-Item -LiteralPath (Join-Path $buildPath 'M5Dial_WLED_Remote.ino.bin') -Destination $firmwareBin -Force
+Copy-Item -LiteralPath (Join-Path $buildPath 'M5Dial_WLED_Remote.ino.merged.bin') -Destination $firmwareMergedBin -Force
 
 Write-Host "Firmware exported to $firmwareBin"
+Write-Host "Full flash image exported to $firmwareMergedBin"

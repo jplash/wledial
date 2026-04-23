@@ -14,3 +14,5 @@ gen2-package.zip
 Thumbs.db
 *.tmp
 *.log
+
+gen2.code-workspace

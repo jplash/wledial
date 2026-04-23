@@ -14,7 +14,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-const char* APP_VERSION      = "0.4.1";
+const char* APP_VERSION      = "0.5.0";
 const char* WLED_DEFAULT_IP   = "192.168.1.100";
 const int   WLED_DEFAULT_PORT = 80;
 
@@ -44,23 +44,31 @@ const int LIST_DRAG_STEP_PX          = 24;
 #define MAX_CONTROLLERS 8
 #define MAX_EFFECTS 256
 #define MAX_PALETTES 256
+#define MAX_PRESETS 250
 
 enum AppState { STATE_SCANNING, STATE_SELECT, STATE_CONTROL };
 enum ControlScreen {
   SCREEN_MAIN_MENU = 0,
   SCREEN_BRIGHTNESS,
   SCREEN_PALETTE_HUE,
+  SCREEN_PRESET,
   SCREEN_FX_PATTERN,
   SCREEN_FX_SPEED,
   SCREEN_FX_INTENSITY,
   SCREEN_SETTINGS
 };
+enum ListKind { LIST_CONTROLLERS, LIST_EFFECTS, LIST_PRESETS };
 enum SettingsItem { SETTING_WIFI = 0, SETTING_SCREEN_BRIGHTNESS, SETTING_CLICK_VOLUME, SETTING_COUNT };
 
 struct WLEDController {
   String name;
   String ip;
   int port;
+};
+
+struct PresetEntry {
+  int id;
+  String name;
 };
 
 struct MenuItem {
@@ -78,12 +86,14 @@ struct WLEDStateSnapshot {
   int fxIndex;
   uint8_t fxIntensity;
   int palIndex;
+  int presetId;
 };
 
 const MenuItem MAIN_MENU_ITEMS[] = {
   {"SEL", "Select Light",  SCREEN_MAIN_MENU,    CLR_CYAN},
   {"BRI", "Brightness",    SCREEN_BRIGHTNESS,   CLR_ACCENT},
   {"PAL", "Palette",       SCREEN_PALETTE_HUE,  CLR_ORANGE},
+  {"PRE", "Preset",        SCREEN_PRESET,       CLR_YELLOW},
   {"FX",  "FX Pattern",    SCREEN_FX_PATTERN,   CLR_BLUE},
   {"SPD", "FX Speed",      SCREEN_FX_SPEED,     CLR_GREEN},
   {"INT", "FX Intensity",  SCREEN_FX_INTENSITY, CLR_MAGENTA},
@@ -94,6 +104,7 @@ const int MAIN_MENU_COUNT = sizeof(MAIN_MENU_ITEMS) / sizeof(MAIN_MENU_ITEMS[0])
 WLEDController controllers[MAX_CONTROLLERS];
 String effectNames[MAX_EFFECTS];
 String paletteNames[MAX_PALETTES];
+PresetEntry presetEntries[MAX_PRESETS];
 
 AppState appState = STATE_CONTROL;
 ControlScreen controlScreen = SCREEN_MAIN_MENU;
@@ -103,6 +114,8 @@ int controllerCount = 0;
 int selectionCursor = 0;
 int effectCount = 0;
 int paletteCount = 0;
+int presetCount = 0;
+int presetCursor = 0;
 int mainMenuIndex = 0;
 
 String wledHost;
@@ -115,8 +128,11 @@ uint8_t wled_fxSpeed = 128;
 int wled_fxIndex = 0;
 uint8_t wled_fxIntensity = 128;
 int wled_palIndex = 0;
+int wled_presetId = -1;
 
 bool pendingSend = false;
+bool pendingPresetApply = false;
+int pendingPresetId = -1;
 unsigned long lastSendMs = 0;
 unsigned long lastPollMs = 0;
 unsigned long lastInteractionMs = 0;
@@ -126,6 +142,7 @@ bool settingsEditing = false;
 bool wifiPortalDidSave = false;
 String cachedEffectLabel;
 String cachedPaletteLabel;
+String cachedPresetLabel;
 
 Preferences preferences;
 uint8_t screenBrightness = 180;
@@ -144,11 +161,14 @@ unsigned long cacheSaveNotBeforeMs = 0;
 SemaphoreHandle_t networkMutex = nullptr;
 TaskHandle_t networkTaskHandle = nullptr;
 bool networkSendRequested = false;
+bool networkSendRequestedIsPreset = false;
 bool networkSendInFlight = false;
+bool networkSendInFlightIsPreset = false;
 bool networkSendSuccessPending = false;
+bool networkSendSuccessWasPreset = false;
 String networkSendHost;
 int networkSendPort = 80;
-WLEDStateSnapshot networkSendState;
+String networkSendBody;
 bool networkFetchRequested = false;
 bool networkFetchInFlight = false;
 bool networkFetchResultPending = false;
@@ -173,7 +193,7 @@ const int MENU_CY = 118;
 const int MENU_RING_R = 92;
 const int MENU_ITEM_R = 18;
 const int MENU_ITEM_R_SEL = 23;
-const float MENU_ANGLES_DEG[MAIN_MENU_COUNT] = {225.0f, 268.0f, 312.0f, 356.0f, 42.0f, 86.0f, 130.0f};
+const float MENU_ANGLES_DEG[MAIN_MENU_COUNT] = {225.0f, 260.0f, 295.0f, 330.0f, 25.0f, 60.0f, 95.0f, 130.0f};
 
 void drawDisplay();
 void discoverWLED();
@@ -182,6 +202,7 @@ int httpRequest(const String& host, int port, const char* method, const char* pa
 void fetchState();
 void fetchEffects();
 void fetchPalettes();
+void fetchPresets();
 void wifiConnect();
 bool connectSavedWifi(unsigned long timeoutMs);
 bool connectWifiCredentials(const String& ssid, const String& pass, unsigned long timeoutMs);
@@ -193,6 +214,8 @@ bool hasStoredWifiCredentials();
 bool readEspStoredWifiCredentials(String& ssid, String& pass);
 void noteInteraction();
 void noteControllerChanged();
+void queueStateSend();
+void queuePresetApply(int presetId);
 void scheduleControllerCacheSave();
 bool backgroundControlSendBusy();
 void processDeferredCacheSave();
@@ -202,10 +225,13 @@ void captureCurrentState(WLEDStateSnapshot& state);
 void applyStateSnapshot(const WLEDStateSnapshot& state);
 bool parseStatePayload(const String& payload, WLEDStateSnapshot& state);
 String buildJsonFromSnapshot(const WLEDStateSnapshot& state);
+String buildPresetJson(int presetId);
 bool requestBackgroundStateSend();
 bool requestBackgroundStateFetch(bool redrawAfter);
 void processNetworkResults();
 void updateCachedLabels();
+int findPresetIndexById(int presetId);
+void syncPresetCursorToCurrentPreset();
 void saveControllerCache();
 bool loadControllerCache(const String& host, int port);
 void refreshActiveController(bool redrawAfter);
@@ -230,7 +256,7 @@ void beginWifiPortal();
 bool runWifiPortal(bool returnToSettings);
 void drawMainMenu();
 void drawMenuIcon(int index, int cx, int cy, bool selected);
-void drawListScreen(const char* title, bool useEffects);
+void drawListScreen(const char* title, ListKind kind);
 void drawPaletteHueScreen();
 void drawNumericScreen(const char* title, int displayValue, const char* suffix, float fraction, uint16_t color, const String& secondary);
 void drawSettingsScreen();
@@ -250,6 +276,7 @@ String currentControllerLabel();
 String currentScreenSummary();
 String currentEffectLabel();
 String currentPaletteLabel();
+String currentPresetLabel();
 void drawCenteredLabel(const String& text, int y, uint16_t color, const lgfx::IFont* font);
 bool pointInCircle(int x, int y, int cx, int cy, int r);
 bool containsIgnoreCase(const String& text, const char* needle);
@@ -290,6 +317,19 @@ void noteInteraction() {
 void noteControllerChanged() {
   controllerSeq++;
   interactionSeq++;
+}
+
+void queueStateSend() {
+  pendingPresetApply = false;
+  pendingPresetId = -1;
+  pendingSend = true;
+}
+
+void queuePresetApply(int presetId) {
+  if (presetId <= 0) return;
+  pendingPresetApply = true;
+  pendingPresetId = presetId;
+  pendingSend = true;
 }
 
 void scheduleControllerCacheSave() {
@@ -333,6 +373,7 @@ void captureCurrentState(WLEDStateSnapshot& state) {
   state.fxIndex = wled_fxIndex;
   state.fxIntensity = wled_fxIntensity;
   state.palIndex = wled_palIndex;
+  state.presetId = wled_presetId;
 }
 
 void applyStateSnapshot(const WLEDStateSnapshot& state) {
@@ -343,6 +384,8 @@ void applyStateSnapshot(const WLEDStateSnapshot& state) {
   wled_fxIndex = state.fxIndex;
   wled_fxIntensity = state.fxIntensity;
   wled_palIndex = state.palIndex;
+  wled_presetId = state.presetId;
+  syncPresetCursorToCurrentPreset();
   updateCachedLabels();
 }
 
@@ -356,6 +399,7 @@ bool parseStatePayload(const String& payload, WLEDStateSnapshot& state) {
   state.fxSpeed = doc["seg"][0]["sx"] | state.fxSpeed;
   state.fxIntensity = doc["seg"][0]["ix"] | state.fxIntensity;
   state.palIndex = doc["seg"][0]["pal"] | state.palIndex;
+  state.presetId = doc["ps"] | state.presetId;
   JsonArray col = doc["seg"][0]["col"][0];
   if (!col.isNull() && col.size() >= 3) {
     int r = col[0] | 0;
@@ -381,10 +425,14 @@ bool requestBackgroundStateSend() {
 
   WLEDStateSnapshot state;
   captureCurrentState(state);
+  String body = pendingPresetApply ? buildPresetJson(pendingPresetId) : buildJsonFromSnapshot(state);
+  if (body.length() == 0) return false;
+
   if (xSemaphoreTake(networkMutex, pdMS_TO_TICKS(25)) != pdTRUE) return false;
   networkSendHost = wledHost;
   networkSendPort = wledPort;
-  networkSendState = state;
+  networkSendBody = body;
+  networkSendRequestedIsPreset = pendingPresetApply;
   networkSendRequested = true;
   xSemaphoreGive(networkMutex);
   return true;
@@ -410,6 +458,7 @@ bool requestBackgroundStateFetch(bool redrawAfter) {
 
 void processNetworkResults() {
   bool sendSucceeded = false;
+  bool sendWasPreset = false;
   bool fetchReady = false;
   bool redrawAfterFetch = false;
   uint32_t fetchInteraction = 0;
@@ -421,6 +470,7 @@ void processNetworkResults() {
   if (networkSendSuccessPending) {
     networkSendSuccessPending = false;
     sendSucceeded = true;
+    sendWasPreset = networkSendSuccessWasPreset;
   }
   if (networkFetchResultPending) {
     networkFetchResultPending = false;
@@ -434,6 +484,10 @@ void processNetworkResults() {
 
   if (sendSucceeded) {
     scheduleControllerCacheSave();
+    if (sendWasPreset) {
+      lastPollMs = 0;
+      requestBackgroundStateFetch(true);
+    }
   }
 
   if (fetchReady &&
@@ -454,18 +508,22 @@ void networkWorkerTask(void* param) {
     bool doFetch = false;
     String host;
     int port = 80;
+    String body;
     WLEDStateSnapshot state;
     uint32_t fetchInteraction = 0;
     uint32_t fetchController = 0;
     bool redrawAfterFetch = false;
+    bool sendWasPreset = false;
 
     if (networkMutex && xSemaphoreTake(networkMutex, portMAX_DELAY) == pdTRUE) {
       if (networkSendRequested) {
         networkSendRequested = false;
         networkSendInFlight = true;
+        sendWasPreset = networkSendRequestedIsPreset;
+        networkSendInFlightIsPreset = sendWasPreset;
         host = networkSendHost;
         port = networkSendPort;
-        state = networkSendState;
+        body = networkSendBody;
         doSend = true;
       } else if (networkFetchRequested) {
         networkFetchRequested = false;
@@ -482,14 +540,17 @@ void networkWorkerTask(void* param) {
     }
 
     if (doSend) {
-      String body = buildJsonFromSnapshot(state);
       Serial.printf("POST -> %s\n", body.c_str());
       int code = httpRequest(host, port, "POST", "/json/state", body, nullptr);
       Serial.printf("HTTP %d\n", code);
       if (networkMutex && xSemaphoreTake(networkMutex, portMAX_DELAY) == pdTRUE) {
         lastHttpCode = code;
-        if (code == 200) networkSendSuccessPending = true;
+        if (code == 200) {
+          networkSendSuccessPending = true;
+          networkSendSuccessWasPreset = sendWasPreset;
+        }
         networkSendInFlight = false;
+        networkSendInFlightIsPreset = false;
         xSemaphoreGive(networkMutex);
       }
     } else if (doFetch) {
@@ -524,6 +585,23 @@ void updateCachedLabels() {
   if (paletteCount > 0 && wled_palIndex >= 0 && wled_palIndex < paletteCount) {
     cachedPaletteLabel = paletteNames[wled_palIndex];
   }
+  int presetIndex = findPresetIndexById(wled_presetId);
+  if (presetIndex >= 0) {
+    cachedPresetLabel = presetEntries[presetIndex].name;
+  }
+}
+
+int findPresetIndexById(int presetId) {
+  if (presetId <= 0) return -1;
+  for (int i = 0; i < presetCount; ++i) {
+    if (presetEntries[i].id == presetId) return i;
+  }
+  return -1;
+}
+
+void syncPresetCursorToCurrentPreset() {
+  int idx = findPresetIndexById(wled_presetId);
+  if (idx >= 0) presetCursor = idx;
 }
 
 void saveControllerCache() {
@@ -538,8 +616,10 @@ void saveControllerCache() {
   preferences.putUChar("cache_sx", wled_fxSpeed);
   preferences.putUChar("cache_ix", wled_fxIntensity);
   preferences.putInt("cache_pal", wled_palIndex);
+  preferences.putInt("cache_ps", wled_presetId);
   preferences.putString("cache_eff", cachedEffectLabel);
   preferences.putString("cache_pn", cachedPaletteLabel);
+  preferences.putString("cache_pr", cachedPresetLabel);
 }
 
 bool loadControllerCache(const String& host, int port) {
@@ -555,8 +635,10 @@ bool loadControllerCache(const String& host, int port) {
   wled_fxSpeed = preferences.getUChar("cache_sx", wled_fxSpeed);
   wled_fxIntensity = preferences.getUChar("cache_ix", wled_fxIntensity);
   wled_palIndex = preferences.getInt("cache_pal", wled_palIndex);
+  wled_presetId = preferences.getInt("cache_ps", wled_presetId);
   cachedEffectLabel = preferences.getString("cache_eff", cachedEffectLabel);
   cachedPaletteLabel = preferences.getString("cache_pn", cachedPaletteLabel);
+  cachedPresetLabel = preferences.getString("cache_pr", cachedPresetLabel);
   Serial.printf("Loaded cached controller state for %s:%d\n", host.c_str(), port);
   return true;
 }
@@ -581,6 +663,7 @@ void refreshActiveController(bool redrawAfter) {
   if (!wifiConnected || wledHost.length() == 0) return;
   fetchEffects();
   fetchPalettes();
+  fetchPresets();
   fetchState();
   saveControllerCache();
   lastPollMs = millis();
@@ -840,7 +923,7 @@ void handleLongPress() {
 
   if (controlScreen == SCREEN_MAIN_MENU) {
     wled_on = !wled_on;
-    pendingSend = true;
+    queueStateSend();
     playClick(wled_on ? 5200 : 2800, 32);
     scheduleControllerCacheSave();
     noteInteraction();
@@ -875,21 +958,31 @@ void applyEncoderSteps(int steps) {
       int level = brightnessToUi(wled_bri);
       level = constrain(level + steps, UI_LEVEL_MIN, UI_LEVEL_MAX);
       wled_bri = levelToByte(level);
-      pendingSend = true;
+      queueStateSend();
       playClick(7600, 16);
       break;
     }
     case SCREEN_PALETTE_HUE:
       if (paletteCount > 0) {
         wled_palIndex = ((wled_palIndex + steps) % paletteCount + paletteCount) % paletteCount;
-        pendingSend = true;
+        queueStateSend();
       }
       playClick(7000, 16);
       break;
     case SCREEN_FX_PATTERN:
       if (effectCount > 0) {
         wled_fxIndex = ((wled_fxIndex + steps) % effectCount + effectCount) % effectCount;
-        pendingSend = true;
+        queueStateSend();
+        playClick(7000, 16);
+      }
+      break;
+    case SCREEN_PRESET:
+      if (presetCount > 0) {
+        presetCursor = ((presetCursor + steps) % presetCount + presetCount) % presetCount;
+        wled_presetId = presetEntries[presetCursor].id;
+        queuePresetApply(wled_presetId);
+        updateCachedLabels();
+        scheduleControllerCacheSave();
         playClick(7000, 16);
       }
       break;
@@ -897,7 +990,7 @@ void applyEncoderSteps(int steps) {
       int level = byteToLevel(wled_fxSpeed);
       level = constrain(level + steps, UI_LEVEL_MIN, UI_LEVEL_MAX);
       wled_fxSpeed = levelToByte(level);
-      pendingSend = true;
+      queueStateSend();
       playClick(7600, 16);
       break;
     }
@@ -905,7 +998,7 @@ void applyEncoderSteps(int steps) {
       int level = byteToLevel(wled_fxIntensity);
       level = constrain(level + steps, UI_LEVEL_MIN, UI_LEVEL_MAX);
       wled_fxIntensity = levelToByte(level);
-      pendingSend = true;
+      queueStateSend();
       playClick(7600, 16);
       break;
     }
@@ -962,6 +1055,8 @@ void loop() {
   if (pendingSend && wifiConnected && (millis() - lastSendMs >= SEND_DEBOUNCE_MS)) {
     if (requestBackgroundStateSend()) {
       pendingSend = false;
+      pendingPresetApply = false;
+      pendingPresetId = -1;
       lastSendMs = millis();
     }
   }
@@ -1000,9 +1095,13 @@ bool touchAngleToFraction(int x, int y, float* fraction) {
 }
 
 bool handleListDrag(const m5::touch_detail_t& t) {
-  bool isListScreen = (appState == STATE_SELECT) || (appState == STATE_CONTROL && controlScreen == SCREEN_FX_PATTERN);
+  bool isListScreen = (appState == STATE_SELECT) ||
+                      (appState == STATE_CONTROL &&
+                       (controlScreen == SCREEN_FX_PATTERN || controlScreen == SCREEN_PRESET));
   if (!isListScreen) return false;
-  int count = (appState == STATE_SELECT) ? controllerCount : effectCount;
+  int count = controllerCount;
+  if (appState == STATE_CONTROL && controlScreen == SCREEN_FX_PATTERN) count = effectCount;
+  else if (appState == STATE_CONTROL && controlScreen == SCREEN_PRESET) count = presetCount;
   if (count <= 0) return false;
   if (t.wasPressed()) listDragAccumY = 0;
   if (!t.isPressed()) return false;
@@ -1073,7 +1172,7 @@ void handleTouch() {
       } else if (controlScreen == SCREEN_FX_INTENSITY) {
         wled_fxIntensity = levelToByte(UI_LEVEL_MIN + (int)roundf(fraction * (UI_LEVEL_MAX - UI_LEVEL_MIN)));
       }
-      pendingSend = true;
+      queueStateSend();
       scheduleControllerCacheSave();
       drawDisplay();
     }
@@ -1305,6 +1404,15 @@ String buildJsonFromSnapshot(const WLEDStateSnapshot& state) {
   return out;
 }
 
+String buildPresetJson(int presetId) {
+  if (presetId <= 0) return String();
+  StaticJsonDocument<64> doc;
+  doc["ps"] = presetId;
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
 int httpRequest(const String& host, int port, const char* method, const char* path, const String& body, String* payload) {
   WiFiClient client;
   client.setTimeout(3000);
@@ -1395,6 +1503,41 @@ void fetchPalettes() {
   }
 }
 
+void fetchPresets() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  String payload;
+  if (httpRequest(wledHost, wledPort, "GET", "/presets.json", "", &payload) == 200) {
+    DynamicJsonDocument doc(32768);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (!err && doc.is<JsonObject>()) {
+      presetCount = 0;
+      for (JsonPair kv : doc.as<JsonObject>()) {
+        if (presetCount >= MAX_PRESETS) break;
+        int id = atoi(kv.key().c_str());
+        if (id <= 0) continue;
+        JsonObject preset = kv.value().as<JsonObject>();
+        const char* name = preset["n"];
+        presetEntries[presetCount].id = id;
+        if (name && strlen(name) > 0) presetEntries[presetCount].name = String(name);
+        else presetEntries[presetCount].name = String("Preset ") + id;
+        presetCount++;
+      }
+      for (int i = 0; i < presetCount - 1; ++i) {
+        for (int j = i + 1; j < presetCount; ++j) {
+          if (presetEntries[j].id < presetEntries[i].id) {
+            PresetEntry tmp = presetEntries[i];
+            presetEntries[i] = presetEntries[j];
+            presetEntries[j] = tmp;
+          }
+        }
+      }
+      syncPresetCursorToCurrentPreset();
+      updateCachedLabels();
+      saveControllerCache();
+    }
+  }
+}
+
 uint16_t hue16(int h) {
   uint8_t r, g, b;
   int sector = h / 60;
@@ -1440,6 +1583,13 @@ String currentPaletteLabel() {
   return "Palette";
 }
 
+String currentPresetLabel() {
+  int idx = findPresetIndexById(wled_presetId);
+  if (idx >= 0) return presetEntries[idx].name;
+  if (cachedPresetLabel.length() > 0) return cachedPresetLabel;
+  return "Preset";
+}
+
 String wifiStatusText() {
   if (!wifiConnected || WiFi.status() != WL_CONNECTED) return "Not connected";
   String ssid = WiFi.SSID();
@@ -1452,10 +1602,11 @@ String currentScreenSummary() {
     case 0: return currentControllerLabel();
     case 1: return String("Level ") + brightnessToUi(wled_bri);
     case 2: return currentPaletteLabel();
-    case 3: return currentEffectLabel();
-    case 4: return String("Level ") + byteToLevel(wled_fxSpeed);
-    case 5: return String("Level ") + byteToLevel(wled_fxIntensity);
-    case 6: return wifiStatusText();
+    case 3: return currentPresetLabel();
+    case 4: return currentEffectLabel();
+    case 5: return String("Level ") + byteToLevel(wled_fxSpeed);
+    case 6: return String("Level ") + byteToLevel(wled_fxIntensity);
+    case 7: return wifiStatusText();
   }
   return String();
 }
@@ -1571,12 +1722,18 @@ void drawMenuIcon(int index, int cx, int cy, bool selected) {
       M5Dial.Display.fillCircle(cx + 2, cy + 2, 1, selected ? MAIN_MENU_ITEMS[index].color : ink);
       break;
     case 3:
+      M5Dial.Display.drawRoundRect(cx - 7, cy - 7, 14, 14, 2, ink);
+      M5Dial.Display.drawLine(cx - 3, cy - 2, cx + 3, cy - 2, ink);
+      M5Dial.Display.drawLine(cx - 3, cy + 2, cx + 3, cy + 2, ink);
+      M5Dial.Display.fillCircle(cx - 1, cy - 5, 1, ink);
+      break;
+    case 4:
       M5Dial.Display.drawLine(cx, cy - 8, cx, cy + 8, ink);
       M5Dial.Display.drawLine(cx - 8, cy, cx + 8, cy, ink);
       M5Dial.Display.drawLine(cx - 6, cy - 6, cx + 6, cy + 6, ink);
       M5Dial.Display.drawLine(cx - 6, cy + 6, cx + 6, cy - 6, ink);
       break;
-    case 4:
+    case 5:
       for (int deg = 210; deg <= 330; deg += 20) {
         float rad = deg * DEG_TO_RAD;
         int px = cx + (int)roundf(cosf(rad) * 8);
@@ -1586,12 +1743,12 @@ void drawMenuIcon(int index, int cx, int cy, bool selected) {
       M5Dial.Display.drawLine(cx, cy + 2, cx + 5, cy - 3, ink);
       M5Dial.Display.fillCircle(cx, cy + 2, 1, ink);
       break;
-    case 5:
+    case 6:
       M5Dial.Display.fillRect(cx - 6, cy + 1, 3, 6, ink);
       M5Dial.Display.fillRect(cx - 1, cy - 2, 3, 9, ink);
       M5Dial.Display.fillRect(cx + 4, cy - 5, 3, 12, ink);
       break;
-    case 6:
+    case 7:
       M5Dial.Display.drawCircle(cx, cy, 4, ink);
       for (int i = 0; i < 6; ++i) {
         float rad = i * (PI / 3.0f);
@@ -1634,10 +1791,19 @@ void drawMainMenu() {
   drawStatusDot(120, 222);
 }
 
-void drawListScreen(const char* title, bool useEffects) {
-  int count = useEffects ? effectCount : controllerCount;
-  int current = useEffects ? wled_fxIndex : selectionCursor;
-  uint16_t accent = useEffects ? CLR_BLUE : CLR_CYAN;
+void drawListScreen(const char* title, ListKind kind) {
+  int count = controllerCount;
+  int current = selectionCursor;
+  uint16_t accent = CLR_CYAN;
+  if (kind == LIST_EFFECTS) {
+    count = effectCount;
+    current = wled_fxIndex;
+    accent = CLR_BLUE;
+  } else if (kind == LIST_PRESETS) {
+    count = presetCount;
+    current = presetCursor;
+    accent = CLR_YELLOW;
+  }
   drawCenteredLabel(title, 18, accent, &fonts::Font0);
   if (count <= 0) {
     drawCenteredLabel("Loading...", 118, CLR_LGRAY, &fonts::FreeSans9pt7b);
@@ -1645,7 +1811,9 @@ void drawListScreen(const char* title, bool useEffects) {
   }
   auto itemName = [&](int idx) -> String {
     idx = (idx % count + count) % count;
-    return useEffects ? effectNames[idx] : controllers[idx].name;
+    if (kind == LIST_EFFECTS) return effectNames[idx];
+    if (kind == LIST_PRESETS) return presetEntries[idx].name;
+    return controllers[idx].name;
   };
   drawCenteredLabel(itemName(current - 3), 38, CLR_DGRAY, &fonts::Font0);
   drawCenteredLabel(itemName(current - 2), 60, CLR_DGRAY, &fonts::Font0);
@@ -1654,7 +1822,7 @@ void drawListScreen(const char* title, bool useEffects) {
   drawCenteredLabel(itemName(current + 1), 158, CLR_LGRAY, &fonts::FreeSans9pt7b);
   drawCenteredLabel(itemName(current + 2), 180, CLR_DGRAY, &fonts::Font0);
   drawCenteredLabel(itemName(current + 3), 202, CLR_DGRAY, &fonts::Font0);
-  if (!useEffects && controllerCount > 0) drawCenteredLabel(controllers[current].ip, 218, CLR_DGRAY, &fonts::Font0);
+  if (kind == LIST_CONTROLLERS && controllerCount > 0) drawCenteredLabel(controllers[current].ip, 218, CLR_DGRAY, &fonts::Font0);
   else {
     char cnt[16];
     snprintf(cnt, sizeof(cnt), "%d / %d", current + 1, count);
@@ -1741,7 +1909,7 @@ void drawDisplay() {
     return;
   }
   if (appState == STATE_SELECT) {
-    drawListScreen("SELECT LIGHT", false);
+    drawListScreen("SELECT LIGHT", LIST_CONTROLLERS);
     return;
   }
   if (!wifiConnected && controlScreen != SCREEN_SETTINGS) {
@@ -1764,8 +1932,11 @@ void drawDisplay() {
     case SCREEN_PALETTE_HUE:
       drawPaletteHueScreen();
       break;
+    case SCREEN_PRESET:
+      drawListScreen("PRESET", LIST_PRESETS);
+      break;
     case SCREEN_FX_PATTERN:
-      drawListScreen("FX PATTERN", true);
+      drawListScreen("FX PATTERN", LIST_EFFECTS);
       break;
     case SCREEN_FX_SPEED:
       drawNumericScreen("FX SPEED", byteToLevel(wled_fxSpeed), "", (byteToLevel(wled_fxSpeed) - UI_LEVEL_MIN) / (float)(UI_LEVEL_MAX - UI_LEVEL_MIN), CLR_GREEN, currentEffectLabel());
