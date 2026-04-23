@@ -10,22 +10,11 @@ No LEDs are attached to this device — it controls a WLED instance over the loc
 | File | Description |
 |---|---|
 | `M5Dial_WLED_Remote.ino` | Arduino firmware for the M5Dial hardware |
-| `simulator.html` | Browser-based simulator — open locally to test firmware logic without hardware |
+| `build-firmware.ps1` | Compile firmware and export the flashable binary |
+| `recover-flash.ps1` | Erase and reflash the M5Dial from the exported firmware image |
+| `firmware/` | Exported firmware binary |
 | `README.md` | This file |
 | `CHANGELOG.md` | Development history and notable changes |
-
----
-
-## Simulator
-
-Open `simulator.html` in any modern browser (no server needed — it's a single self-contained file).
-
-- Click **Load firmware** to load the firmware into the editor
-- Press **▶ Upload & Run** to execute it
-- Use the **‹ ›** buttons to rotate the encoder
-- Hold **●** to simulate a long press (cycles encoder mode)
-- Click **●** briefly to toggle power
-- Use the fault injection buttons to test WiFi drop, WLED 500 errors, and slow network behaviour
 
 ---
 

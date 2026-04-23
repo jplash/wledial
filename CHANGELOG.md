@@ -21,6 +21,8 @@ atomic release.
 
 ### Changed
 
+- Removed the browser simulator from the repo and cleaned the README so the
+  project is focused on the M5Dial firmware and flash/recovery scripts.
 - Moved the 5-second WLED state poll and debounced control POSTs onto a
   background FreeRTOS worker so slow controller HTTP responses no longer block
   touch, encoder, or button handling. Background refresh results are discarded
