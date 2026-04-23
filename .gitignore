@@ -1,0 +1,16 @@
+# Arduino build outputs
+.arduino-build/
+.arduino-tmp/
+build/
+*.elf
+*.map
+*.hex
+
+# Local/generated bundles
+gen2-package.zip
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
