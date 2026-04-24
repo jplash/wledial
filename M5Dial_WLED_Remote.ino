@@ -14,7 +14,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-const char* APP_VERSION      = "0.5.0";
+const char* APP_VERSION      = "0.5.1";
 const char* WLED_DEFAULT_IP   = "192.168.1.100";
 const int   WLED_DEFAULT_PORT = 80;
 
@@ -178,6 +178,22 @@ int networkFetchPort = 80;
 uint32_t networkFetchInteractionSeq = 0;
 uint32_t networkFetchControllerSeq = 0;
 WLEDStateSnapshot networkFetchState;
+bool networkCatalogRequested = false;
+bool networkCatalogInFlight = false;
+bool networkCatalogResultPending = false;
+bool networkCatalogRedraw = false;
+bool networkCatalogEffectsReady = false;
+bool networkCatalogPalettesReady = false;
+bool networkCatalogPresetsReady = false;
+String networkCatalogHost;
+int networkCatalogPort = 80;
+uint32_t networkCatalogControllerSeq = 0;
+String networkEffectNames[MAX_EFFECTS];
+String networkPaletteNames[MAX_PALETTES];
+PresetEntry networkPresetEntries[MAX_PRESETS];
+int networkEffectCount = 0;
+int networkPaletteCount = 0;
+int networkPresetCount = 0;
 uint32_t interactionSeq = 0;
 uint32_t controllerSeq = 0;
 
@@ -214,6 +230,7 @@ bool hasStoredWifiCredentials();
 bool readEspStoredWifiCredentials(String& ssid, String& pass);
 void noteInteraction();
 void noteControllerChanged();
+void clearControllerCatalogs();
 void queueStateSend();
 void queuePresetApply(int presetId);
 void scheduleControllerCacheSave();
@@ -228,6 +245,7 @@ String buildJsonFromSnapshot(const WLEDStateSnapshot& state);
 String buildPresetJson(int presetId);
 bool requestBackgroundStateSend();
 bool requestBackgroundStateFetch(bool redrawAfter);
+bool requestBackgroundCatalogFetch(bool redrawAfter);
 void processNetworkResults();
 void updateCachedLabels();
 int findPresetIndexById(int presetId);
@@ -246,6 +264,7 @@ bool touchToArcFraction(int x, int y, float* fraction);
 bool touchAngleToFraction(int x, int y, float* fraction);
 bool handleListDrag(const m5::touch_detail_t& t);
 String buildJson();
+String parseWLEDNameFromInfo(const String& payload, const String& fallback);
 uint16_t hue16(int hue);
 void drawArc(float fraction, uint16_t color);
 void openMainMenu();
@@ -281,6 +300,9 @@ void drawCenteredLabel(const String& text, int y, uint16_t color, const lgfx::IF
 bool pointInCircle(int x, int y, int cx, int cy, int r);
 bool containsIgnoreCase(const String& text, const char* needle);
 String wifiStatusText();
+bool fetchEffectsFor(const String& host, int port, String* names, int& count);
+bool fetchPalettesFor(const String& host, int port, String* names, int& count);
+bool fetchPresetsFor(const String& host, int port, PresetEntry* presets, int& count);
 
 void loadPreferences() {
   preferences.begin("m5dial-wled", false);
@@ -317,6 +339,17 @@ void noteInteraction() {
 void noteControllerChanged() {
   controllerSeq++;
   interactionSeq++;
+}
+
+void clearControllerCatalogs() {
+  effectCount = 0;
+  paletteCount = 0;
+  presetCount = 0;
+  presetCursor = 0;
+  cachedEffectLabel = "";
+  cachedPaletteLabel = "";
+  cachedPresetLabel = "";
+  lastHttpCode = 0;
 }
 
 void queueStateSend() {
@@ -456,6 +489,22 @@ bool requestBackgroundStateFetch(bool redrawAfter) {
   return true;
 }
 
+bool requestBackgroundCatalogFetch(bool redrawAfter) {
+  if (!networkMutex || !networkTaskHandle || wledHost.length() == 0) return false;
+  if (xSemaphoreTake(networkMutex, pdMS_TO_TICKS(25)) != pdTRUE) return false;
+  if (networkCatalogRequested || networkCatalogInFlight || networkCatalogResultPending) {
+    xSemaphoreGive(networkMutex);
+    return true;
+  }
+  networkCatalogHost = wledHost;
+  networkCatalogPort = wledPort;
+  networkCatalogControllerSeq = controllerSeq;
+  networkCatalogRedraw = redrawAfter;
+  networkCatalogRequested = true;
+  xSemaphoreGive(networkMutex);
+  return true;
+}
+
 void processNetworkResults() {
   bool sendSucceeded = false;
   bool sendWasPreset = false;
@@ -464,6 +513,9 @@ void processNetworkResults() {
   uint32_t fetchInteraction = 0;
   uint32_t fetchController = 0;
   WLEDStateSnapshot fetchedState;
+  bool catalogReady = false;
+  bool redrawAfterCatalog = false;
+  uint32_t catalogController = 0;
 
   if (!networkMutex) return;
   if (xSemaphoreTake(networkMutex, pdMS_TO_TICKS(5)) != pdTRUE) return;
@@ -479,6 +531,28 @@ void processNetworkResults() {
     fetchInteraction = networkFetchInteractionSeq;
     fetchController = networkFetchControllerSeq;
     fetchedState = networkFetchState;
+  }
+  if (networkCatalogResultPending) {
+    networkCatalogResultPending = false;
+    catalogReady = true;
+    redrawAfterCatalog = networkCatalogRedraw;
+    catalogController = networkCatalogControllerSeq;
+    bool catalogMatchesController = (catalogController == controllerSeq);
+    if (catalogMatchesController && networkCatalogEffectsReady) {
+      effectCount = networkEffectCount;
+      for (int i = 0; i < effectCount; ++i) effectNames[i] = networkEffectNames[i];
+    }
+    if (catalogMatchesController && networkCatalogPalettesReady) {
+      paletteCount = networkPaletteCount;
+      for (int i = 0; i < paletteCount; ++i) paletteNames[i] = networkPaletteNames[i];
+    }
+    if (catalogMatchesController && networkCatalogPresetsReady) {
+      presetCount = networkPresetCount;
+      for (int i = 0; i < presetCount; ++i) presetEntries[i] = networkPresetEntries[i];
+    }
+    networkCatalogEffectsReady = false;
+    networkCatalogPalettesReady = false;
+    networkCatalogPresetsReady = false;
   }
   xSemaphoreGive(networkMutex);
 
@@ -499,6 +573,15 @@ void processNetworkResults() {
     scheduleControllerCacheSave();
     if (redrawAfterFetch) drawDisplay();
   }
+
+  if (catalogReady &&
+      catalogController == controllerSeq &&
+      appState == STATE_CONTROL) {
+    syncPresetCursorToCurrentPreset();
+    updateCachedLabels();
+    scheduleControllerCacheSave();
+    if (redrawAfterCatalog) drawDisplay();
+  }
 }
 
 void networkWorkerTask(void* param) {
@@ -506,13 +589,16 @@ void networkWorkerTask(void* param) {
   for (;;) {
     bool doSend = false;
     bool doFetch = false;
+    bool doCatalog = false;
     String host;
     int port = 80;
     String body;
     WLEDStateSnapshot state;
     uint32_t fetchInteraction = 0;
     uint32_t fetchController = 0;
+    uint32_t catalogController = 0;
     bool redrawAfterFetch = false;
+    bool redrawAfterCatalog = false;
     bool sendWasPreset = false;
 
     if (networkMutex && xSemaphoreTake(networkMutex, portMAX_DELAY) == pdTRUE) {
@@ -535,6 +621,14 @@ void networkWorkerTask(void* param) {
         fetchController = networkFetchControllerSeq;
         redrawAfterFetch = networkFetchRedraw;
         doFetch = true;
+      } else if (networkCatalogRequested) {
+        networkCatalogRequested = false;
+        networkCatalogInFlight = true;
+        host = networkCatalogHost;
+        port = networkCatalogPort;
+        catalogController = networkCatalogControllerSeq;
+        redrawAfterCatalog = networkCatalogRedraw;
+        doCatalog = true;
       }
       xSemaphoreGive(networkMutex);
     }
@@ -570,6 +664,26 @@ void networkWorkerTask(void* param) {
           networkFetchResultPending = true;
         }
         networkFetchInFlight = false;
+        xSemaphoreGive(networkMutex);
+      }
+    } else if (doCatalog) {
+      int fetchedEffectCount = 0;
+      int fetchedPaletteCount = 0;
+      int fetchedPresetCount = 0;
+      bool effectsOk = fetchEffectsFor(host, port, networkEffectNames, fetchedEffectCount);
+      bool palettesOk = fetchPalettesFor(host, port, networkPaletteNames, fetchedPaletteCount);
+      bool presetsOk = fetchPresetsFor(host, port, networkPresetEntries, fetchedPresetCount);
+      if (networkMutex && xSemaphoreTake(networkMutex, portMAX_DELAY) == pdTRUE) {
+        networkEffectCount = fetchedEffectCount;
+        networkPaletteCount = fetchedPaletteCount;
+        networkPresetCount = fetchedPresetCount;
+        networkCatalogEffectsReady = effectsOk;
+        networkCatalogPalettesReady = palettesOk;
+        networkCatalogPresetsReady = presetsOk;
+        networkCatalogControllerSeq = catalogController;
+        networkCatalogRedraw = redrawAfterCatalog;
+        networkCatalogResultPending = effectsOk || palettesOk || presetsOk;
+        networkCatalogInFlight = false;
         xSemaphoreGive(networkMutex);
       }
     } else {
@@ -803,6 +917,9 @@ void openScreen(ControlScreen screen) {
   arcTouchActive = false;
   listDragAccumY = 0;
   resetEncoderState();
+  if (screen == SCREEN_PALETTE_HUE || screen == SCREEN_PRESET || screen == SCREEN_FX_PATTERN) {
+    requestBackgroundCatalogFetch(true);
+  }
 }
 
 void setup() {
@@ -871,14 +988,14 @@ void selectCurrentController() {
   wledHost = controllers[selectionCursor].ip;
   wledPort = controllers[selectionCursor].port;
   noteControllerChanged();
+  clearControllerCatalogs();
   Serial.printf("Selected: %s (%s:%d)\n", controllers[selectionCursor].name.c_str(), wledHost.c_str(), wledPort);
   appState = STATE_CONTROL;
   openMainMenu();
   loadControllerCache(wledHost, wledPort);
   drawDisplay();
-  refreshActiveController(false);
-  saveControllerCache();
-  drawDisplay();
+  if (requestBackgroundStateFetch(true)) lastPollMs = millis();
+  requestBackgroundCatalogFetch(true);
 }
 
 void handleShortPress() {
@@ -1318,14 +1435,22 @@ void drawWifiPortal() {
   M5Dial.Display.drawCenterString("Save to continue", 120, 158, &fonts::Font0);
 }
 
+String parseWLEDNameFromInfo(const String& payload, const String& fallback) {
+  StaticJsonDocument<64> filter;
+  filter["name"] = true;
+  StaticJsonDocument<128> doc;
+  DeserializationError err = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+  if (!err) {
+    const char* n = doc["name"];
+    if (n && strlen(n) > 0) return String(n);
+  }
+  return fallback;
+}
+
 static String fetchWLEDName(const String& ip, int port, const String& fallback) {
   String payload;
   if (httpRequest(ip, port, "GET", "/json/info", "", &payload) == 200) {
-    StaticJsonDocument<512> doc;
-    if (!deserializeJson(doc, payload)) {
-      const char* n = doc["name"];
-      if (n && strlen(n) > 0) return String(n);
-    }
+    return parseWLEDNameFromInfo(payload, fallback);
   }
   return fallback;
 }
@@ -1350,12 +1475,7 @@ void discoverWLED() {
     Serial.printf("mDNS: none - probing %s...\n", WLED_DEFAULT_IP);
     String payload;
     if (httpRequest(WLED_DEFAULT_IP, WLED_DEFAULT_PORT, "GET", "/json/info", "", &payload) == 200) {
-      String name = "WLED";
-      StaticJsonDocument<512> doc;
-      if (!deserializeJson(doc, payload)) {
-        const char* n = doc["name"];
-        if (n && strlen(n) > 0) name = n;
-      }
+      String name = parseWLEDNameFromInfo(payload, "WLED");
       controllers[0].ip = WLED_DEFAULT_IP;
       controllers[0].name = name;
       controllers[0].port = WLED_DEFAULT_PORT;
@@ -1469,72 +1589,96 @@ void fetchState() {
   }
 }
 
-void fetchEffects() {
-  if (WiFi.status() != WL_CONNECTED) return;
+bool fetchEffectsFor(const String& host, int port, String* names, int& count) {
+  if (WiFi.status() != WL_CONNECTED) return false;
   String payload;
-  if (httpRequest(wledHost, wledPort, "GET", "/json/eff", "", &payload) == 200) {
+  if (httpRequest(host, port, "GET", "/json/eff", "", &payload) == 200) {
     DynamicJsonDocument doc(8192);
     if (!deserializeJson(doc, payload)) {
-      effectCount = 0;
+      int loadedCount = 0;
       for (JsonVariant v : doc.as<JsonArray>()) {
-        if (effectCount >= MAX_EFFECTS) break;
-        effectNames[effectCount++] = v.as<String>();
+        if (loadedCount >= MAX_EFFECTS) break;
+        names[loadedCount++] = v.as<String>();
       }
-      updateCachedLabels();
-      saveControllerCache();
+      count = loadedCount;
+      return true;
     }
   }
+  return false;
 }
 
-void fetchPalettes() {
-  if (WiFi.status() != WL_CONNECTED) return;
+bool fetchPalettesFor(const String& host, int port, String* names, int& count) {
+  if (WiFi.status() != WL_CONNECTED) return false;
   String payload;
-  if (httpRequest(wledHost, wledPort, "GET", "/json/pal", "", &payload) == 200) {
+  if (httpRequest(host, port, "GET", "/json/pal", "", &payload) == 200) {
     DynamicJsonDocument doc(4096);
     if (!deserializeJson(doc, payload)) {
-      paletteCount = 0;
+      int loadedCount = 0;
       for (JsonVariant v : doc.as<JsonArray>()) {
-        if (paletteCount >= MAX_PALETTES) break;
-        paletteNames[paletteCount++] = v.as<String>();
+        if (loadedCount >= MAX_PALETTES) break;
+        names[loadedCount++] = v.as<String>();
       }
-      updateCachedLabels();
-      saveControllerCache();
+      count = loadedCount;
+      return true;
     }
   }
+  return false;
 }
 
-void fetchPresets() {
-  if (WiFi.status() != WL_CONNECTED) return;
+bool fetchPresetsFor(const String& host, int port, PresetEntry* presets, int& count) {
+  if (WiFi.status() != WL_CONNECTED) return false;
   String payload;
-  if (httpRequest(wledHost, wledPort, "GET", "/presets.json", "", &payload) == 200) {
+  if (httpRequest(host, port, "GET", "/presets.json", "", &payload) == 200) {
     DynamicJsonDocument doc(32768);
     DeserializationError err = deserializeJson(doc, payload);
     if (!err && doc.is<JsonObject>()) {
-      presetCount = 0;
+      int loadedCount = 0;
       for (JsonPair kv : doc.as<JsonObject>()) {
-        if (presetCount >= MAX_PRESETS) break;
+        if (loadedCount >= MAX_PRESETS) break;
         int id = atoi(kv.key().c_str());
         if (id <= 0) continue;
         JsonObject preset = kv.value().as<JsonObject>();
         const char* name = preset["n"];
-        presetEntries[presetCount].id = id;
-        if (name && strlen(name) > 0) presetEntries[presetCount].name = String(name);
-        else presetEntries[presetCount].name = String("Preset ") + id;
-        presetCount++;
+        presets[loadedCount].id = id;
+        if (name && strlen(name) > 0) presets[loadedCount].name = String(name);
+        else presets[loadedCount].name = String("Preset ") + id;
+        loadedCount++;
       }
-      for (int i = 0; i < presetCount - 1; ++i) {
-        for (int j = i + 1; j < presetCount; ++j) {
-          if (presetEntries[j].id < presetEntries[i].id) {
-            PresetEntry tmp = presetEntries[i];
-            presetEntries[i] = presetEntries[j];
-            presetEntries[j] = tmp;
+      for (int i = 0; i < loadedCount - 1; ++i) {
+        for (int j = i + 1; j < loadedCount; ++j) {
+          if (presets[j].id < presets[i].id) {
+            PresetEntry tmp = presets[i];
+            presets[i] = presets[j];
+            presets[j] = tmp;
           }
         }
       }
-      syncPresetCursorToCurrentPreset();
-      updateCachedLabels();
-      saveControllerCache();
+      count = loadedCount;
+      return true;
     }
+  }
+  return false;
+}
+
+void fetchEffects() {
+  if (fetchEffectsFor(wledHost, wledPort, effectNames, effectCount)) {
+    updateCachedLabels();
+    saveControllerCache();
+  }
+}
+
+void fetchPalettes() {
+  if (fetchPalettesFor(wledHost, wledPort, paletteNames, paletteCount)) {
+    updateCachedLabels();
+    saveControllerCache();
+  }
+}
+
+void fetchPresets() {
+  if (fetchPresetsFor(wledHost, wledPort, presetEntries, presetCount)) {
+    syncPresetCursorToCurrentPreset();
+    updateCachedLabels();
+    saveControllerCache();
   }
 }
 
@@ -1788,7 +1932,7 @@ void drawMainMenu() {
     String palette = (paletteCount > 0 && wled_palIndex < paletteCount) ? paletteNames[wled_palIndex] : String("Rainbow");
     drawPalettePreview(120, 203, 118, 18, palette);
   }
-  drawStatusDot(120, 222);
+  drawStatusDot(222, 22);
 }
 
 void drawListScreen(const char* title, ListKind kind) {

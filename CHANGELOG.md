@@ -6,6 +6,18 @@ This changelog was started after the first round of development work, so the
 initial entry captures the codebase changes made so far rather than a single
 atomic release.
 
+## [0.5.1] - 2026-04-24
+
+### Fixed
+
+- Fixed controller display names by parsing the WLED `/json/info` `name`
+  field with a filtered JSON document instead of falling back when the full
+  info payload is too large.
+- Removed the blocking live refresh after selecting a controller; cached state
+  is shown immediately while state and catalog data refresh in the background.
+- Moved the HTTP status dot away from the bottom main-menu ring so it no longer
+  overlaps the `FX Intensity` icon.
+
 ## [0.5.0] - 2026-04-22
 
 ### Added
