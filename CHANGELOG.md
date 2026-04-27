@@ -6,6 +6,19 @@ This changelog was started after the first round of development work, so the
 initial entry captures the codebase changes made so far rather than a single
 atomic release.
 
+## [0.5.2] - 2026-04-26
+
+### Fixed
+
+- Updated WLED state writes so effect, palette, speed, intensity, and color
+  changes apply to all selected segments instead of only segment 0.
+- Changed state parsing to follow the selected segment, or `mainseg` when
+  nothing is selected, so the UI reflects the active WLED segment instead of
+  assuming `seg[0]`.
+- Switched state refreshes to WLED's `/json` endpoint and read
+  `info.leds.seglc` capability metadata so non-RGB segments are handled more
+  safely.
+
 ## [0.5.1] - 2026-04-24
 
 ### Fixed

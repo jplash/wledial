@@ -14,7 +14,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-const char* APP_VERSION      = "0.5.1";
+const char* APP_VERSION      = "0.5.2";
 const char* WLED_DEFAULT_IP   = "192.168.1.100";
 const int   WLED_DEFAULT_PORT = 80;
 
@@ -87,6 +87,9 @@ struct WLEDStateSnapshot {
   uint8_t fxIntensity;
   int palIndex;
   int presetId;
+  int activeSegId;
+  int selectedSegCount;
+  uint8_t activeSegCapabilities;
 };
 
 const MenuItem MAIN_MENU_ITEMS[] = {
@@ -129,6 +132,9 @@ int wled_fxIndex = 0;
 uint8_t wled_fxIntensity = 128;
 int wled_palIndex = 0;
 int wled_presetId = -1;
+int wled_activeSegId = 0;
+int wled_selectedSegCount = 1;
+uint8_t wled_activeSegCapabilities = 0x01;
 
 bool pendingSend = false;
 bool pendingPresetApply = false;
@@ -243,6 +249,11 @@ void applyStateSnapshot(const WLEDStateSnapshot& state);
 bool parseStatePayload(const String& payload, WLEDStateSnapshot& state);
 String buildJsonFromSnapshot(const WLEDStateSnapshot& state);
 String buildPresetJson(int presetId);
+JsonObjectConst getStateRoot(JsonDocument& doc);
+JsonObjectConst getInfoRoot(JsonDocument& doc);
+JsonObjectConst findActiveSegment(JsonVariantConst segValue, int mainSegId, int& activeSegId, int& selectedSegCount);
+uint8_t getSegmentCapabilities(JsonObjectConst infoRoot, int activeSegId, uint8_t fallback);
+void updateHueFromColor(JsonVariantConst rgbValue, WLEDStateSnapshot& state);
 bool requestBackgroundStateSend();
 bool requestBackgroundStateFetch(bool redrawAfter);
 bool requestBackgroundCatalogFetch(bool redrawAfter);
@@ -407,6 +418,9 @@ void captureCurrentState(WLEDStateSnapshot& state) {
   state.fxIntensity = wled_fxIntensity;
   state.palIndex = wled_palIndex;
   state.presetId = wled_presetId;
+  state.activeSegId = wled_activeSegId;
+  state.selectedSegCount = wled_selectedSegCount;
+  state.activeSegCapabilities = wled_activeSegCapabilities;
 }
 
 void applyStateSnapshot(const WLEDStateSnapshot& state) {
@@ -418,37 +432,138 @@ void applyStateSnapshot(const WLEDStateSnapshot& state) {
   wled_fxIntensity = state.fxIntensity;
   wled_palIndex = state.palIndex;
   wled_presetId = state.presetId;
+  wled_activeSegId = state.activeSegId;
+  wled_selectedSegCount = state.selectedSegCount;
+  wled_activeSegCapabilities = state.activeSegCapabilities;
   syncPresetCursorToCurrentPreset();
   updateCachedLabels();
 }
 
+JsonObjectConst getStateRoot(JsonDocument& doc) {
+  JsonObjectConst nested = doc["state"].as<JsonObjectConst>();
+  if (!nested.isNull()) return nested;
+  return doc.as<JsonObjectConst>();
+}
+
+JsonObjectConst getInfoRoot(JsonDocument& doc) {
+  JsonObjectConst nested = doc["info"].as<JsonObjectConst>();
+  if (!nested.isNull()) return nested;
+  if (doc["state"].isNull()) return doc.as<JsonObjectConst>();
+  return JsonObjectConst();
+}
+
+JsonObjectConst findActiveSegment(JsonVariantConst segValue, int mainSegId, int& activeSegId, int& selectedSegCount) {
+  activeSegId = 0;
+  selectedSegCount = 0;
+
+  JsonArrayConst segments = segValue.as<JsonArrayConst>();
+  if (segments.isNull() || segments.size() == 0) {
+    return JsonObjectConst();
+  }
+
+  JsonObjectConst chosen;
+  int chosenId = -1;
+  int index = 0;
+  for (JsonObjectConst segment : segments) {
+    int segmentId = segment["id"] | index;
+    if (segment["sel"] | false) {
+      selectedSegCount++;
+      if (chosen.isNull() || segmentId < chosenId) {
+        chosen = segment;
+        chosenId = segmentId;
+      }
+    }
+    ++index;
+  }
+
+  if (chosen.isNull()) {
+    index = 0;
+    for (JsonObjectConst segment : segments) {
+      int segmentId = segment["id"] | index;
+      if (segmentId == mainSegId) {
+        chosen = segment;
+        chosenId = segmentId;
+        break;
+      }
+      ++index;
+    }
+  }
+
+  if (chosen.isNull()) {
+    JsonVariantConst first = segments[0];
+    chosen = first.as<JsonObjectConst>();
+    chosenId = chosen["id"] | 0;
+  }
+
+  activeSegId = chosenId >= 0 ? chosenId : 0;
+  return chosen;
+}
+
+uint8_t getSegmentCapabilities(JsonObjectConst infoRoot, int activeSegId, uint8_t fallback) {
+  if (fallback == 0) fallback = 0x01;
+  if (infoRoot.isNull()) return fallback;
+
+  JsonVariantConst globalLc = infoRoot["leds"]["lc"];
+  if (!globalLc.isNull()) {
+    fallback = globalLc.as<uint8_t>();
+  }
+
+  JsonArrayConst segCapabilities = infoRoot["leds"]["seglc"].as<JsonArrayConst>();
+  if (!segCapabilities.isNull() && activeSegId >= 0 && activeSegId < segCapabilities.size()) {
+    return segCapabilities[activeSegId] | fallback;
+  }
+  return fallback;
+}
+
+void updateHueFromColor(JsonVariantConst rgbValue, WLEDStateSnapshot& state) {
+  JsonArrayConst col = rgbValue.as<JsonArrayConst>();
+  if (col.isNull() || col.size() < 3) return;
+
+  int r = col[0] | 0;
+  int g = col[1] | 0;
+  int b = col[2] | 0;
+  float maxv = max(r, max(g, b));
+  float minv = min(r, min(g, b));
+  float delta = maxv - minv;
+  if (delta <= 0.0f) return;
+
+  float hue;
+  if (maxv == r) hue = 60.0f * fmodf(((g - b) / delta), 6.0f);
+  else if (maxv == g) hue = 60.0f * (((b - r) / delta) + 2.0f);
+  else hue = 60.0f * (((r - g) / delta) + 4.0f);
+  if (hue < 0) hue += 360.0f;
+  state.hue = (int)roundf(hue) % 360;
+}
+
 bool parseStatePayload(const String& payload, WLEDStateSnapshot& state) {
-  StaticJsonDocument<1536> doc;
+  DynamicJsonDocument doc(8192);
   if (deserializeJson(doc, payload)) return false;
 
-  state.on = doc["on"] | state.on;
-  state.bri = doc["bri"] | state.bri;
-  state.fxIndex = doc["seg"][0]["fx"] | state.fxIndex;
-  state.fxSpeed = doc["seg"][0]["sx"] | state.fxSpeed;
-  state.fxIntensity = doc["seg"][0]["ix"] | state.fxIntensity;
-  state.palIndex = doc["seg"][0]["pal"] | state.palIndex;
-  state.presetId = doc["ps"] | state.presetId;
-  JsonArray col = doc["seg"][0]["col"][0];
-  if (!col.isNull() && col.size() >= 3) {
-    int r = col[0] | 0;
-    int g = col[1] | 0;
-    int b = col[2] | 0;
-    float maxv = max(r, max(g, b));
-    float minv = min(r, min(g, b));
-    float delta = maxv - minv;
-    if (delta > 0.0f) {
-      float hue;
-      if (maxv == r) hue = 60.0f * fmodf(((g - b) / delta), 6.0f);
-      else if (maxv == g) hue = 60.0f * (((b - r) / delta) + 2.0f);
-      else hue = 60.0f * (((r - g) / delta) + 4.0f);
-      if (hue < 0) hue += 360.0f;
-      state.hue = (int)roundf(hue) % 360;
-    }
+  JsonObjectConst stateRoot = getStateRoot(doc);
+  if (stateRoot.isNull()) return false;
+
+  state.on = stateRoot["on"] | state.on;
+  state.bri = stateRoot["bri"] | state.bri;
+  state.presetId = stateRoot["ps"] | state.presetId;
+
+  int mainSegId = stateRoot["mainseg"] | state.activeSegId;
+  int activeSegId = state.activeSegId;
+  int selectedSegCount = state.selectedSegCount;
+  JsonObjectConst activeSegment = findActiveSegment(stateRoot["seg"], mainSegId, activeSegId, selectedSegCount);
+  state.activeSegId = activeSegId;
+  state.selectedSegCount = selectedSegCount > 0 ? selectedSegCount : 1;
+  state.activeSegCapabilities = getSegmentCapabilities(getInfoRoot(doc), activeSegId, state.activeSegCapabilities);
+
+  if (activeSegment.isNull()) return true;
+
+  state.fxIndex = activeSegment["fx"] | state.fxIndex;
+  state.fxSpeed = activeSegment["sx"] | state.fxSpeed;
+  state.fxIntensity = activeSegment["ix"] | state.fxIntensity;
+  state.palIndex = activeSegment["pal"] | state.palIndex;
+
+  if (state.activeSegCapabilities & 0x01) {
+    JsonVariantConst primaryColor = activeSegment["col"][0];
+    updateHueFromColor(primaryColor, state);
   }
   return true;
 }
@@ -649,7 +764,7 @@ void networkWorkerTask(void* param) {
       }
     } else if (doFetch) {
       String payload;
-      int code = httpRequest(host, port, "GET", "/json/state", "", &payload);
+      int code = httpRequest(host, port, "GET", "/json", "", &payload);
       bool parsed = false;
       if (code == 200) {
         parsed = parseStatePayload(payload, state);
@@ -1494,30 +1609,31 @@ String buildJsonFromSnapshot(const WLEDStateSnapshot& state) {
   StaticJsonDocument<512> doc;
   doc["on"] = state.on;
   doc["bri"] = state.bri;
-  JsonArray seg = doc.createNestedArray("seg");
-  JsonObject s = seg.createNestedObject();
+  JsonObject s = doc.createNestedObject("seg");
   s["fx"] = state.fxIndex;
   s["sx"] = state.fxSpeed;
   s["ix"] = state.fxIntensity;
   s["pal"] = state.palIndex;
 
-  uint8_t r, g, b;
-  int hue = ((state.hue % 360) + 360) % 360;
-  int sector = hue / 60;
-  int frac = (hue % 60) * 255 / 60;
-  switch (sector) {
-    case 0: r = 255; g = frac; b = 0; break;
-    case 1: r = 255 - frac; g = 255; b = 0; break;
-    case 2: r = 0; g = 255; b = frac; break;
-    case 3: r = 0; g = 255 - frac; b = 255; break;
-    case 4: r = frac; g = 0; b = 255; break;
-    default: r = 255; g = 0; b = 255 - frac; break;
+  if (state.activeSegCapabilities & 0x01) {
+    uint8_t r, g, b;
+    int hue = ((state.hue % 360) + 360) % 360;
+    int sector = hue / 60;
+    int frac = (hue % 60) * 255 / 60;
+    switch (sector) {
+      case 0: r = 255; g = frac; b = 0; break;
+      case 1: r = 255 - frac; g = 255; b = 0; break;
+      case 2: r = 0; g = 255; b = frac; break;
+      case 3: r = 0; g = 255 - frac; b = 255; break;
+      case 4: r = frac; g = 0; b = 255; break;
+      default: r = 255; g = 0; b = 255 - frac; break;
+    }
+    JsonArray col = s.createNestedArray("col");
+    JsonArray rgb = col.createNestedArray();
+    rgb.add(r);
+    rgb.add(g);
+    rgb.add(b);
   }
-  JsonArray col = s.createNestedArray("col");
-  JsonArray rgb = col.createNestedArray();
-  rgb.add(r);
-  rgb.add(g);
-  rgb.add(b);
 
   String out;
   serializeJson(doc, out);
@@ -1578,7 +1694,7 @@ void sendState() {
 void fetchState() {
   if (WiFi.status() != WL_CONNECTED) return;
   String payload;
-  if (httpRequest(wledHost, wledPort, "GET", "/json/state", "", &payload) == 200) {
+  if (httpRequest(wledHost, wledPort, "GET", "/json", "", &payload) == 200) {
     WLEDStateSnapshot state;
     captureCurrentState(state);
     if (parseStatePayload(payload, state)) {
